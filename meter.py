@@ -30,7 +30,7 @@ st.markdown("""
 # ================= HEADER ================= #
 st.markdown("""
 <div style='text-align:center; margin-bottom:0.4rem;'>
-    <span style='font-size:30px; font-weight:800; color:#003A8C;'>
+    <span style='font-size:45px; font-weight:800; color:#003A8C;'>
         Genus Power Infrastructures Ltd.
     </span>
     <div style='width:240px; height:4px; margin:6px auto 0 auto;
@@ -192,3 +192,4 @@ else:
     pkg.index.name = "Date"
     pkg = pkg.reset_index()
     graph_and_table(pkg, f"📦 {package}")
+
