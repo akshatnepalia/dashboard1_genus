@@ -33,8 +33,8 @@ st.markdown("""
 
 # ================= COMPANY NAME + DASHBOARD TITLE ================= #
 st.markdown("""
-<div style='text-align:center; margin-bottom:0.3rem;'>
-    <span style='font-size:28px; font-weight:800; color:#003A8C;'>
+<div style='text-align:center; margin-bottom:0.5rem;'>
+    <span style='font-size:35px; font-weight:800; color:#003A8C;'>
         Genus Power Infrastructures Ltd.
     </span>
     <div style='width:260px; height:4px; margin:6px auto 0 auto;
@@ -97,7 +97,7 @@ def graph_and_table(data, title):
     # WC-MI Bars
     fig.add_trace(go.Bar(
         x=data["Date"], y=data["WC-MI"],
-        name="WC-MI", marker_color="#FF6666", hoverinfo="skip"
+        name="WC-MI", marker_color="#FF7666", hoverinfo="skip"
     ))
 
     hovertemplate = (
@@ -115,7 +115,7 @@ def graph_and_table(data, title):
     # DT Bars with Hover
     fig.add_trace(go.Bar(
         x=data["Date"], y=data["DT"], base=data["WC-MI"],
-        name="DT", marker_color="#FFD700",
+        name="DT", marker_color="#FFD700",hoverinfo="skip",
         customdata=data[["Total_Manpower", "CI", "MI",
                          "IN-HOUSE", "Supervisory",
                          "Total_WC_DT", "WC-MI", "DT"]],
