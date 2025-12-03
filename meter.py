@@ -1,18 +1,51 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+from sqlalchemy import create_engine, text
 
 # ================= PAGE CONFIG ================= #
-st.set_page_config(layout="wide")
+st.set_page_config(layout="wide", page_title="Genus Meter Dashboard")
 
 # ================= CUSTOM CSS ================= #
 st.markdown("""
 <style>
-    div.block-container {padding-top: 1.2rem;}
+    div.block-container {padding-top: 1.0rem;}
     thead tr th {
         background-color: #003A8C !important;
         color: white !important;
         font-weight: bold !important;
+    }
+    .kpi-block {
+        background-color: #F2F7FF;
+        border: 2px solid #003A8C;
+        border-radius: 10px;
+        padding: 10px 8px;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+    }
+    .kpi-value {
+        font-size: 26px;
+        font-weight: 900;
+        color: #003A8C;
+        margin-top: 4px;
+    }
+    .kpi-label {
+        font-size: 14px;
+        font-weight: 600;
+        color: #333;
+    }
+    .admin-box {
+        background-color: #F8FAFF;
+        border-radius: 12px;
+        border: 1px solid #D5E1FF;
+        padding: 18px;
+        margin-top: 10px;
+    }
+    .footer-small {
+        font-size: 12px;
+        color: #555;
+        text-align:center;
+        margin-top: 1.2rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -20,184 +53,251 @@ st.markdown("""
 # ================= HEADER ================= #
 st.markdown("""
 <div style='text-align:center;margin-bottom:0.5rem;'>
-    <span style='font-size:52px;font-weight:800;color:#003A8C;'>
-        Genus Power Infrastructures Ltd.
-    </span>
-    <div style='width:260px;height:4px;margin:6px auto;background:#FFD700;border-radius:4px;'></div>
+    <a href='https://genuspower.com' target='_blank'
+       style='text-decoration:none;'>
+        <span style='font-size:42px;font-weight:800;color:#003A8C;'>
+            Genus Power Infrastructures Ltd.
+        </span>
+    </a>
+    <div style='width:260px;height:4px;margin:6px auto;
+                background:#FFD700;border-radius:4px;'></div>
 </div>
+
 <h4 style='text-align:center;font-weight:700;margin-top:0.2rem;margin-bottom:0.8rem;'>
 📊 Meter Dashboard — WC/DT + Manpower
 </h4>
 """, unsafe_allow_html=True)
 
-# ================= LOAD DATA ================= #
-df = pd.read_excel("meter_data.xlsx")
+# ================= DB LOAD ================= #
+engine = create_engine(st.secrets["DB_URL"])
+df = pd.read_sql("SELECT * FROM meter_data ORDER BY date ASC", engine)
 
-# Keep Date as date only (no 00:00:00)
-df["Date"] = pd.to_datetime(df["Date"]).dt.date
-
-num_cols = ["WC-MI", "DT", "CI", "MI", "IN-HOUSE", "Supervisory"]
+df["date"] = pd.to_datetime(df["date"]).dt.date
+num_cols = ["wc_mi", "dt", "ci", "mi", "in_house", "supervisory"]
 df[num_cols] = df[num_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
 
-df["Total_Manpower"] = df["CI"] + df["MI"] + df["IN-HOUSE"] + df["Supervisory"]
-df["Total_WC_DT"] = df["WC-MI"] + df["DT"]
+df["Total_Manpower"] = df["ci"] + df["mi"] + df["in_house"] + df["supervisory"]
+df["Total_WC_DT"] = df["wc_mi"] + df["dt"]
 
-# Full November date range for x-axis (1–26 Nov)
-full_dates = pd.date_range("2025-11-01", "2025-11-26").date
+# FULL dynamic date range based on DB
+full_dates = pd.date_range(df["date"].min(), df["date"].max()).date
 
-# ================= FILTERS UI ================= #
-st.markdown("### 🔍 Filters")
+# ================= SESSION FOR ADMIN LOGIN ================= #
+if "admin_logged_in" not in st.session_state:
+    st.session_state["admin_logged_in"] = False
 
-c1, c2, c3 = st.columns([2, 1, 1])
-with c1:
-    view = st.radio("View Mode", ["Combined View", "Package Wise View"], horizontal=True)
-with c2:
-    start_date = st.date_input("Start Date", df["Date"].min())
-with c3:
-    end_date = st.date_input("End Date", df["Date"].max())
+# ================= HELPERS ================= #
+def kfmt(v):
+    return f"{v/1000:.1f}k" if v >= 1000 else str(int(v))
 
-package = None
-if view == "Package Wise View":
-    package = st.selectbox("Select Package", sorted(df["Package"].unique()))
-
-df_filtered = df[(df["Date"] >= start_date) & (df["Date"] <= end_date)]
-
-# ================= KPI FORMATTER ================= #
-def kfmt(v: float) -> str:
-    v = float(v)
-    if v >= 1000:
-        return f"{v/1000:.1f}k"
-    return str(int(v))
-
-
-# ================= GRAPH + TABLE + KPIs ================= #
-def graph_and_table(data: pd.DataFrame, title: str):
-    data = data.copy()
-    # Ensure required columns
-    data["Total_WC_DT"] = data["WC-MI"] + data["DT"]
-
-    # ---------- KPIs (based on CURRENT data) ---------- #
-    total_meters = data["Total_WC_DT"].sum()
-
-    if (data["Total_WC_DT"] > 0).any():
-        idx_peak_mtr = data["Total_WC_DT"].idxmax()
-        peak_mtr_day = data.loc[idx_peak_mtr, "Date"]
-        peak_mtr_val = data.loc[idx_peak_mtr, "Total_WC_DT"]
-        peak_install_label = f"{peak_mtr_val:.0f} on {peak_mtr_day.strftime('%d-%b-%Y')}"
-    else:
-        peak_install_label = "-"
-
-    if (data["Total_Manpower"] > 0).any():
-        idx_peak_mp = data["Total_Manpower"].idxmax()
-        peak_mp_day = data.loc[idx_peak_mp, "Date"]
-        peak_mp_val = data.loc[idx_peak_mp, "Total_Manpower"]
-        peak_mp_label = f"{peak_mp_val:.0f} on {peak_mp_day.strftime('%d-%b-%Y')}"
-    else:
-        peak_mp_label = "-"
-
-    k1, k2, k3 = st.columns(3)
-    k1.metric("📦 Total Meters (WC-MI + DT)", kfmt(total_meters))
-    k2.metric("📈 Peak Installation Day", peak_install_label)
-    k3.metric("👥 Peak Manpower Day", peak_mp_label)
-
-    # ---------- GRAPH ---------- #
-    max_man = data["Total_Manpower"].max() if len(data) else 0
-
-    fig = go.Figure()
-
-    # WC-MI bar
-    fig.add_trace(go.Bar(
-        x=data["Date"],
-        y=data["WC-MI"],
-        name="WC-MI",
-        marker_color="#FF7B7B",
-        hoverinfo="skip"
-    ))
-
-    # Hover tooltip – unchanged structure
-    hovertemplate = (
-        "Date: %{x|%d-%b}<br>"
-        "Total Manpower: %{customdata[0]:.0f}<br>"
-        "CI: %{customdata[1]:.0f}<br>"
-        "MI: %{customdata[2]:.0f}<br>"
-        "IN-HOUSE: %{customdata[3]:.0f}<br>"
-        "Supervisory: %{customdata[4]:.0f}<br>"
-        "<b>Total Meters: %{customdata[5]:.0f}</b><br>"
-        "WC-MI: %{customdata[6]:.0f}<br>"
-        "DT: %{customdata[7]:.0f}<br><extra></extra>"
+def show_footer():
+    st.markdown(
+        "<div class='footer-small'>"
+        "Developed for <b>Genus Power</b> • "
+        "<a href='mailto:analytics@genuspower.com'>Contact Analytics Team</a>"
+        "</div>",
+        unsafe_allow_html=True,
     )
 
-    # DT stacked bar (owner of tooltip)
-    fig.add_trace(go.Bar(
-        x=data["Date"],
-        y=data["DT"],
-        base=data["WC-MI"],
-        name="DT",
-        marker_color="#FFD700",
-        customdata=data[[
-            "Total_Manpower", "CI", "MI",
-            "IN-HOUSE", "Supervisory",
-            "Total_WC_DT", "WC-MI", "DT"
-        ]],
-        hovertemplate=hovertemplate
-    ))
+# ================= SIDEBAR NAVIGATION ================= #
+st.sidebar.markdown("### 🧭 Navigation")
+menu = st.sidebar.radio("Go to", ["Dashboard", "Admin"])
 
-    # Total Meters labels – under bars, plain numbers (no k)
+# ================= ADMIN LOGIN ================= #
+def admin_login_ui():
+    st.markdown("### 🔐 Admin Login")
+    with st.form("admin_login_form", clear_on_submit=True):
+        user = st.text_input("Username")
+        pwd = st.text_input("Password", type="password")
+        ok = st.form_submit_button("Login")
+    if ok:
+        if (
+            user == st.secrets.get("ADMIN_USER", "")
+            and pwd == st.secrets.get("ADMIN_PASS", "")
+        ):
+            st.session_state["admin_logged_in"] = True
+            st.success("Login successful ✅")
+            st.rerun()
+        else:
+            st.error("Incorrect username or password.")
+
+# ================= GRAPH + TABLE FUNCTION ================= #
+def graph_and_table(data: pd.DataFrame):
+    data = data.copy()
+
+    # --- KPI values --- #
+    total_meters = data["Total_WC_DT"].sum()
+
+    if len(data) > 0 and data["Total_WC_DT"].sum() > 0:
+        peak_m_idx = data["Total_WC_DT"].idxmax()
+        peak_install_label = (
+            f"{int(data.loc[peak_m_idx,'Total_WC_DT'])} on "
+            f"{data.loc[peak_m_idx,'date'].strftime('%d-%b')}"
+        )
+    else:
+        peak_install_label = "N/A"
+
+    if len(data) > 0 and data["Total_Manpower"].sum() > 0:
+        peak_mp_idx = data["Total_Manpower"].idxmax()
+        peak_mp_label = (
+            f"{int(data.loc[peak_mp_idx,'Total_Manpower'])} on "
+            f"{data.loc[peak_mp_idx,'date'].strftime('%d-%b')}"
+        )
+    else:
+        peak_mp_label = "N/A"
+
+    # --- KPI Scoreboard --- #
+    k1, k2, k3 = st.columns(3)
+    k1.markdown(
+        f"<div class='kpi-block'>"
+        f"<div class='kpi-label'>📦 Total Meters Installed</div>"
+        f"<div class='kpi-value'>{kfmt(total_meters)}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    k2.markdown(
+        f"<div class='kpi-block'>"
+        f"<div class='kpi-label'>📈 Peak Installation</div>"
+        f"<div class='kpi-value'>{peak_install_label}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    k3.markdown(
+        f"<div class='kpi-block'>"
+        f"<div class='kpi-label'>👥 Peak Manpower</div>"
+        f"<div class='kpi-value'>{peak_mp_label}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # --- GRAPH --- #
+    fig = go.Figure()
+
+    hovertemplate = (
+        "Date: %{x}<br><br>"
+        "Total Manpower: %{customdata[0]}<br>"
+        "CI: %{customdata[1]}<br>"
+        "MI: %{customdata[2]}<br>"
+        "IN-HOUSE: %{customdata[3]}<br>"
+        "Supervisory: %{customdata[4]}<br><br>"
+        "Total Meters: %{customdata[5]}<br>"
+        "WC-MI: %{customdata[6]}<br>"
+        "DT: %{customdata[7]}<br><extra></extra>"
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=data["date"],
+            y=data["wc_mi"],
+            name="WC-MI",
+            marker_color="#FF7B7B",
+            customdata=data[
+                [
+                    "Total_Manpower",
+                    "ci",
+                    "mi",
+                    "in_house",
+                    "supervisory",
+                    "Total_WC_DT",
+                    "wc_mi",
+                    "dt",
+                ]
+            ],
+            hovertemplate=hovertemplate,
+        )
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=data["date"],
+            y=data["dt"],
+            name="DT",
+            marker_color="#FFD700",
+            customdata=data[
+                [
+                    "Total_Manpower",
+                    "ci",
+                    "mi",
+                    "in_house",
+                    "supervisory",
+                    "Total_WC_DT",
+                    "wc_mi",
+                    "dt",
+                ]
+            ],
+            hovertemplate=hovertemplate,
+        )
+    )
+
+    # Total meters labels near bottom
     max_total = data["Total_WC_DT"].max() if len(data) else 0
-    bottom_y = max_total * 0.03 if max_total > 0 else 1
+    baseline_y = max_total * 0.03 if max_total > 0 else 5
 
-    fig.add_trace(go.Scatter(
-        x=data["Date"],
-        y=[bottom_y] * len(data),
-        text=[str(int(v)) for v in data["Total_WC_DT"]],
-        mode="text",
-        textposition="bottom center",
-        textfont=dict(color="black", size=11),
-        hoverinfo="skip",
-        showlegend=False
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=data["date"],
+            y=[baseline_y] * len(data),
+            text=[kfmt(v) for v in data["Total_WC_DT"]],
+            mode="text",
+            textposition="bottom center",
+            textfont=dict(size=11, color="black"),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
 
-    # Manpower line + labels – bold & dark
-    fig.add_trace(go.Scatter(
-        x=data["Date"],
-        y=data["Total_Manpower"],
-        name="Total Manpower",
-        mode="lines+markers+text",
-        text=[f"<b>{int(v)}</b>" for v in data["Total_Manpower"]],
-        textposition="top center",
-        textfont=dict(color="black", size=13),
-        line=dict(color="#003A8C", width=3),
-        marker=dict(size=8, color="#003A8C"),
-        yaxis="y2",
-        hoverinfo="skip"
-    ))
+    # Total Manpower line
+    fig.add_trace(
+        go.Scatter(
+            x=data["date"],
+            y=data["Total_Manpower"],
+            name="Total Manpower",
+            mode="lines+markers+text",
+            text=[f"<b>{int(v)}</b>" for v in data["Total_Manpower"]],
+            textposition="top center",
+            line=dict(color="#003A8C", width=3),
+            marker=dict(size=10, color="#003A8C"),
+            yaxis="y2",
+            hoverinfo="skip",
+        )
+    )
 
     fig.update_layout(
-        title=title,
-        height=560,
+        height=550,
         barmode="stack",
-        bargap=0.18,
-        hovermode="x unified",
-        template="plotly_white",
+        hovermode="closest",
         xaxis=dict(
-            tickvals=data["Date"],  # all dates present in data (we reindex on full_dates)
-            ticktext=[d.strftime("%d-%b") for d in data["Date"]],
-            tickangle=45
+            tickvals=data["date"],
+            ticktext=[d.strftime("%d-%b") for d in data["date"]],
+            tickangle=45,
         ),
-        yaxis=dict(title="Meters"),
-        yaxis2=dict(title="Manpower", overlaying="y", side="right"),
-        legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"),
-        margin=dict(l=10, r=10, t=30, b=80)
+        yaxis2=dict(overlaying="y", side="right"),
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # ---------- TABLE (HIGHLIGHT TOTAL ROWS) ---------- #
-    table = data.set_index("Date")[[
-        "Total_WC_DT", "WC-MI", "DT",
-        "Total_Manpower", "CI", "MI", "IN-HOUSE", "Supervisory"
-    ]].T
+    # --- TABLE --- #
+    if len(data) == 0:
+        st.info("No data available for selected filters.")
+        return
 
+    table = data.set_index("date")[
+        [
+            "Total_WC_DT",
+            "wc_mi",
+            "dt",
+            "Total_Manpower",
+            "ci",
+            "mi",
+            "in_house",
+            "supervisory",
+        ]
+    ]
+
+    table.index = pd.to_datetime(table.index, errors="coerce")
+    table.index = table.index.strftime("%d-%b")
+
+    table = table.T
     table.index = [
         "🔷 Total Meters (WC+DT)",
         "WC-MI",
@@ -206,45 +306,151 @@ def graph_and_table(data: pd.DataFrame, title: str):
         "CI",
         "MI",
         "IN-HOUSE",
-        "Supervisory"
+        "Supervisory",
     ]
+    table = table.astype(int)
 
-    table.columns = [d.strftime("%d-%b") for d in table.columns]
-    table = table.fillna(0).astype(int)
-
-    def style_row(row):
-        if row.name in ["🔷 Total Meters (WC+DT)", "🟢 Total Manpower"]:
-            return ['font-weight:bold; background-color:#E6F2FF'] * len(row)
-        return [''] * len(row)
+    def highlight_rows(row):
+        if row.name == "🔷 Total Meters (WC+DT)":
+            return ["background-color:#CDE4FF;font-weight:bold"] * len(row)
+        if row.name == "🟢 Total Manpower":
+            return ["background-color:#D4F7D4;font-weight:bold"] * len(row)
+        return [""] * len(row)
 
     st.subheader("📋 Date-wise Summary Table")
-    st.dataframe(table.style.apply(style_row, axis=1), use_container_width=True)
+    st.dataframe(
+        table.style.apply(highlight_rows, axis=1),
+        use_container_width=True,
+    )
 
 
-# ================= VIEW EXECUTION ================= #
-if view == "Combined View":
-    grp = df_filtered.groupby("Date")[[
-        "WC-MI", "DT", "CI", "MI",
-        "IN-HOUSE", "Supervisory",
-        "Total_Manpower", "Total_WC_DT"
-    ]].sum()
+# ================= DASHBOARD VIEW ================= #
+if menu == "Dashboard":
 
-    grp = grp.reindex(full_dates, fill_value=0)
-    grp.index.name = "Date"
-    grp = grp.reset_index()
+    st.markdown("### 📊 Dashboard View")
 
-    graph_and_table(grp, "📌 All Packages")
+    # Filters only for dashboard
+    fc1, fc2, fc3 = st.columns([2, 1, 1])
+    with fc1:
+        view = st.radio("View Mode", ["Combined View", "Package Wise View"], horizontal=True)
+    with fc2:
+        start_date = st.date_input("Start Date", df["date"].min())
+    with fc3:
+        end_date = st.date_input("End Date", df["date"].max())
 
-else:
-    pkg_df = df_filtered[df_filtered["Package"] == package]
-    grp = pkg_df.groupby("Date")[[
-        "WC-MI", "DT", "CI", "MI",
-        "IN-HOUSE", "Supervisory",
-        "Total_Manpower", "Total_WC_DT"
-    ]].sum()
+    if view == "Package Wise View":
+        package = st.selectbox("Select Package", sorted(df["package"].unique()))
+    else:
+        package = None
 
-    grp = grp.reindex(full_dates, fill_value=0)
-    grp.index.name = "Date"
-    grp = grp.reset_index()
+    df_filtered = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
 
-    graph_and_table(grp, f"📦 Package — {package}")
+    if view == "Combined View":
+        grp = (
+            df_filtered.groupby("date")[
+                [
+                    "wc_mi",
+                    "dt",
+                    "ci",
+                    "mi",
+                    "in_house",
+                    "supervisory",
+                    "Total_Manpower",
+                    "Total_WC_DT",
+                ]
+            ]
+            .sum()
+            .reindex(full_dates, fill_value=0)
+            .reset_index()
+        )
+        graph_and_table(grp)
+    else:
+        pkg_df = df_filtered[df_filtered["package"] == package]
+        grp = (
+            pkg_df.groupby("date")[
+                [
+                    "wc_mi",
+                    "dt",
+                    "ci",
+                    "mi",
+                    "in_house",
+                    "supervisory",
+                    "Total_Manpower",
+                    "Total_WC_DT",
+                ]
+            ]
+            .sum()
+            .reindex(full_dates, fill_value=0)
+            .reset_index()
+        )
+        graph_and_table(grp)
+
+    show_footer()
+
+# ================= ADMIN VIEW ================= #
+elif menu == "Admin":
+    if not st.session_state["admin_logged_in"]:
+        admin_login_ui()
+        show_footer()
+        st.stop()
+
+    st.markdown("### 🛠 Admin Panel — Data Entry")
+
+    with st.expander("➕ Add New Daily Entry", expanded=True):
+        with st.form("data_entry_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                date_val = st.date_input("Date")
+                package_val = st.selectbox("Package", sorted(df["package"].unique()))
+            with c2:
+                wc_mi_val = st.number_input("WC-MI", min_value=0, step=1)
+                dt_val = st.number_input("DT", min_value=0, step=1)
+
+            c3, c4, c5, c6 = st.columns(4)
+            with c3:
+                ci_val = st.number_input("CI", min_value=0, step=1)
+            with c4:
+                mi_val = st.number_input("MI", min_value=0, step=1)
+            with c5:
+                in_house_val = st.number_input("IN-HOUSE", min_value=0, step=1)
+            with c6:
+                supervisory_val = st.number_input("Supervisory", min_value=0, step=1)
+
+            submitted = st.form_submit_button("✅ Save to Database")
+
+        if submitted:
+            try:
+                ins_query = text("""
+                    INSERT INTO meter_data (date, package, wc_mi, dt, ci, mi, in_house, supervisory)
+                    VALUES (:date, :package, :wc_mi, :dt, :ci, :mi, :in_house, :supervisory)
+                """)
+                with engine.begin() as conn:
+                    conn.execute(
+                        ins_query,
+                        {
+                            "date": date_val,
+                            "package": package_val,
+                            "wc_mi": wc_mi_val,
+                            "dt": dt_val,
+                            "ci": ci_val,
+                            "mi": mi_val,
+                            "in_house": in_house_val,
+                            "supervisory": supervisory_val,
+                        },
+                    )
+                st.success("✅ Data added successfully. Dashboard will reflect it on next load.")
+            except Exception as e:
+                st.error(f"❌ Database Error: {e}")
+
+    st.markdown("---")
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("🔁 Refresh Data"):
+            st.rerun()
+    with c2:
+        if st.button("🚪 Logout Admin"):
+            st.session_state["admin_logged_in"] = False
+            st.success("Logged out.")
+            st.rerun()
+
+    show_footer()
