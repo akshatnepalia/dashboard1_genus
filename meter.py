@@ -68,8 +68,7 @@ ADMIN_PASS = st.secrets.get("ADMIN_PASS", "12345")
 # ===================== DB CONNECTION ===================== #
 @st.cache_resource
 def get_engine():
-    db_url = st.secrets["DB_URL"]
-    # Neon URL already has sslmode, pool_pre_ping keeps it healthy
+    db_url = st.secrets["DATABASE_URL"]
     engine = create_engine(db_url, pool_pre_ping=True)
     return engine
 
@@ -103,7 +102,6 @@ def init_db():
 
 @st.cache_data
 def load_data():
-    """Read all data from DB with computed columns."""
     engine = get_engine()
     query = """
     SELECT
@@ -138,7 +136,6 @@ def clear_cache():
 
 
 def upsert_row(row):
-    """Insert or update a single Date+Package row."""
     engine = get_engine()
     stmt = text("""
         INSERT INTO meter_data
@@ -169,6 +166,7 @@ init_db()
 # ===================== NAVIGATION ===================== #
 mode = st.sidebar.radio("🔀 Navigate", ["Dashboard", "Admin Panel"])
 
+
 # ====================================================== #
 #                       DASHBOARD                        #
 # ====================================================== #
@@ -181,12 +179,13 @@ def graph_and_table(df_view: pd.DataFrame):
     total_meters = int(df_view["Total_WC_DT"].sum())
 
     peak_m_idx = df_view["Total_WC_DT"].idxmax()
+    peak_mp_idx = df_view["Total_Manpower"].idxmax()
+
     peak_install_label = (
         f"{int(df_view.loc[peak_m_idx,'Total_WC_DT'])} on "
         f"{df_view.loc[peak_m_idx,'date'].strftime('%d-%b')}"
     )
 
-    peak_mp_idx = df_view["Total_Manpower"].idxmax()
     peak_mp_label = (
         f"{int(df_view.loc[peak_mp_idx,'Total_Manpower'])} on "
         f"{df_view.loc[peak_mp_idx,'date'].strftime('%d-%b')}"
@@ -200,12 +199,14 @@ def graph_and_table(df_view: pd.DataFrame):
             f"<div class='kpi-label'>📦 Total Meters (WC+DT)</div>"
             f"<div class='kpi-value'>{kfmt(total_meters)}</div>"
             f"</div>", unsafe_allow_html=True)
+
     with c2:
         st.markdown(
             f"<div class='kpi-card'>"
             f"<div class='kpi-label'>📈 Peak Installation (Meters)</div>"
             f"<div class='kpi-value'>{peak_install_label}</div>"
             f"</div>", unsafe_allow_html=True)
+
     with c3:
         st.markdown(
             f"<div class='kpi-card'>"
@@ -213,46 +214,25 @@ def graph_and_table(df_view: pd.DataFrame):
             f"<div class='kpi-value'>{peak_mp_label}</div>"
             f"</div>", unsafe_allow_html=True)
 
-    # Graph
+    # Graph rendering
     full_dates = pd.date_range(df_view["date"].min(), df_view["date"].max()).date
-
-    hovertemplate = (
-        "Date: %{x}<br><br>"
-        "Total Manpower: %{customdata[0]}<br>"
-        "CI: %{customdata[1]}<br>"
-        "MI: %{customdata[2]}<br>"
-        "IN-HOUSE: %{customdata[3]}<br>"
-        "Supervisory: %{customdata[4]}<br><br>"
-        "Total Meters: %{customdata[5]}<br>"
-        "WC-MI: %{customdata[6]}<br>"
-        "DT: %{customdata[7]}<br>"
-        "<extra></extra>"
-    )
 
     fig = go.Figure()
 
-    # WC-MI bars
+    # WC-MI
     fig.add_trace(go.Bar(
         x=df_view["date"],
         y=df_view["wc_mi"],
         name="WC-MI",
         marker_color="#FF7B7B",
-        customdata=df_view[["Total_Manpower", "ci", "mi",
-                            "in_house", "supervisory",
-                            "Total_WC_DT", "wc_mi", "dt"]],
-        hovertemplate=hovertemplate
     ))
 
-    # DT stacked bars
+    # DT
     fig.add_trace(go.Bar(
         x=df_view["date"],
         y=df_view["dt"],
         name="DT",
         marker_color="#FFD700",
-        customdata=df_view[["Total_Manpower", "ci", "mi",
-                            "in_house", "supervisory",
-                            "Total_WC_DT", "wc_mi", "dt"]],
-        hovertemplate=hovertemplate
     ))
 
     # Manpower line
@@ -265,8 +245,7 @@ def graph_and_table(df_view: pd.DataFrame):
         textposition="top center",
         line=dict(color="#003A8C", width=3),
         marker=dict(size=9, color="#003A8C"),
-        yaxis="y2",
-        hoverinfo="skip"
+        yaxis="y2"
     ))
 
     fig.update_layout(
@@ -278,7 +257,7 @@ def graph_and_table(df_view: pd.DataFrame):
             ticktext=[d.strftime("%d-%b") for d in full_dates],
             tickangle=45
         ),
-        yaxis=dict(title="Meters"),
+        yaxis=dict(title="Meters", tickformat="~s"),
         yaxis2=dict(title="Manpower", overlaying="y", side="right"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                     xanchor="center", x=0.5)
@@ -287,11 +266,12 @@ def graph_and_table(df_view: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True)
 
     # TABLE
-    table = df_view.set_index("date")[[
-        "Total_WC_DT", "wc_mi", "dt",
-        "Total_Manpower", "ci", "mi", "in_house", "supervisory"
-    ]]
+    table = df_view.set_index("date")[
+        ["Total_WC_DT", "wc_mi", "dt",
+         "Total_Manpower", "ci", "mi", "in_house", "supervisory"]
+    ]
 
+    table.index = pd.to_datetime(table.index)  # FIX applied ✔
     table.index = table.index.strftime("%d-%b")
     table = table.T
 
@@ -302,16 +282,8 @@ def graph_and_table(df_view: pd.DataFrame):
 
     table = table.astype(int)
 
-    def highlight_rows(row):
-        if row.name == "🔷 Total Meters (WC+DT)":
-            return ["background-color:#CDE4FF;font-weight:bold"] * len(row)
-        if row.name == "🟢 Total Manpower":
-            return ["background-color:#D4F7D4;font-weight:bold"] * len(row)
-        return [""] * len(row)
-
     st.subheader("📋 Date-wise Summary Table")
-    st.dataframe(table.style.apply(highlight_rows, axis=1),
-                 use_container_width=True)
+    st.dataframe(table, use_container_width=True)
 
 
 def show_dashboard():
@@ -323,10 +295,8 @@ def show_dashboard():
     st.markdown("### 🔍 Filters")
 
     col1, col2, col3 = st.columns([2, 1, 1])
-
     with col1:
-        view = st.radio("View Mode", ["Combined View", "Package Wise View"],
-                        horizontal=True)
+        view = st.radio("View Mode", ["Combined View", "Package Wise View"], horizontal=True)
 
     min_d = df["date"].min()
     max_d = df["date"].max()
@@ -346,18 +316,18 @@ def show_dashboard():
     df_range = df[mask]
 
     if view == "Combined View":
-        grp = df_range.groupby("date")[[
-            "wc_mi", "dt", "ci", "mi", "in_house",
-            "supervisory", "Total_Manpower", "Total_WC_DT"
-        ]].sum().reset_index()
+        grp = df_range.groupby("date")[
+            ["wc_mi", "dt", "ci", "mi", "in_house",
+             "supervisory", "Total_Manpower", "Total_WC_DT"]
+        ].sum().reset_index()
         graph_and_table(grp)
     else:
         pkg = st.selectbox("Select Package", ALLOWED_PACKAGES)
         df_pkg = df_range[df_range["package"] == pkg]
-        grp = df_pkg.groupby("date")[[
-            "wc_mi", "dt", "ci", "mi", "in_house",
-            "supervisory", "Total_Manpower", "Total_WC_DT"
-        ]].sum().reset_index()
+        grp = df_pkg.groupby("date")[
+            ["wc_mi", "dt", "ci", "mi", "in_house",
+             "supervisory", "Total_Manpower", "Total_WC_DT"]
+        ].sum().reset_index()
         graph_and_table(grp)
 
 
@@ -365,8 +335,6 @@ def show_dashboard():
 #                        ADMIN PANEL                     #
 # ====================================================== #
 def parse_date_col(series: pd.Series) -> pd.Series:
-    """Parse dates from CSV in flexible formats."""
-    # try day-first & year-first; keep best
     parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
     mask = parsed.isna()
     if mask.any():
@@ -413,7 +381,6 @@ def handle_csv_upload(uploaded):
     for c in num_cols:
         df_csv[c] = pd.to_numeric(df_csv[c], errors="coerce").fillna(0).astype(int)
 
-    # Upsert each row (respect unique date+package)
     count = 0
     for _, r in df_csv.iterrows():
         row = dict(
@@ -453,7 +420,6 @@ def show_admin():
 
     st.success("Logged In ✅")
 
-    # ----- Insert New Data Card ----- #
     with st.expander("➕ Insert New Data", expanded=True):
         c1, c2 = st.columns(2)
         with c1:
@@ -491,15 +457,13 @@ def show_admin():
             upsert_row(row)
             st.success(f"Saved data for {d.strftime('%d-%b')} — {pkg}")
 
-    # ----- CSV Upload Card ----- #
-    with st.expander("📂 Bulk Upload via CSV", expanded=False):
+    with st.expander("📂 Bulk Upload via CSV"):
         st.write("CSV must have columns:")
         st.code("Date, Package, WC-MI, DT, CI, MI, IN-HOUSE, Supervisory, sum")
         uploaded = st.file_uploader("Upload CSV", type=["csv"])
         if uploaded is not None:
             handle_csv_upload(uploaded)
 
-    # ----- Preview Latest Data ----- #
     st.subheader("🧾 Latest 20 Rows in Database")
     df_all = load_data()
     if df_all.empty:
@@ -509,7 +473,7 @@ def show_admin():
         st.dataframe(df_prev, use_container_width=True)
 
 
-# ===================== MAIN RENDER ===================== #
+# ===================== MAIN ===================== #
 if mode == "Dashboard":
     show_dashboard()
 else:
