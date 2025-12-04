@@ -51,7 +51,7 @@ st.markdown("""
 
 st.markdown("""
 <h4 style='text-align:center;font-weight:700;margin-top:0.1rem;margin-bottom:0.8rem;'>
-📊 Meter Dashboard — WC/DT + Manpower
+📊 Meter Dashboard — WC/DT + Manpower (Toolkit Restored)
 </h4>
 """, unsafe_allow_html=True)
 
@@ -68,66 +68,52 @@ ADMIN_PASS = st.secrets.get("ADMIN_PASS", "12345")
 # ===================== DB CONNECTION ===================== #
 @st.cache_resource
 def get_engine():
-    db_url = st.secrets["DATABASE_URL"]
+    db_url = st.secrets["DB_URL"]
     engine = create_engine(db_url, pool_pre_ping=True)
     return engine
 
 
 @st.cache_resource
 def init_db():
-    """Create table & unique index if they don't exist."""
     engine = get_engine()
-    ddl_table = """
+    ddl = """
     CREATE TABLE IF NOT EXISTS meter_data (
         id SERIAL PRIMARY KEY,
         date DATE NOT NULL,
         package TEXT NOT NULL,
-        wc_mi INTEGER NOT NULL DEFAULT 0,
-        dt INTEGER NOT NULL DEFAULT 0,
-        ci INTEGER NOT NULL DEFAULT 0,
-        mi INTEGER NOT NULL DEFAULT 0,
-        in_house INTEGER NOT NULL DEFAULT 0,
-        supervisory INTEGER NOT NULL DEFAULT 0
+        wc_mi INTEGER DEFAULT 0,
+        dt INTEGER DEFAULT 0,
+        ci INTEGER DEFAULT 0,
+        mi INTEGER DEFAULT 0,
+        in_house INTEGER DEFAULT 0,
+        supervisory INTEGER DEFAULT 0
     );
-    """
-    ddl_index = """
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_meter_date_package
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_meter_unique
     ON meter_data(date, package);
     """
     with engine.begin() as conn:
-        conn.execute(text(ddl_table))
-        conn.execute(text(ddl_index))
+        for stmt in ddl.split(";"):
+            if stmt.strip():
+                conn.execute(text(stmt))
     return True
 
 
 @st.cache_data
 def load_data():
     engine = get_engine()
-    query = """
-    SELECT
-        date,
-        package,
-        wc_mi,
-        dt,
-        ci,
-        mi,
-        in_house,
-        supervisory
-    FROM meter_data
-    ORDER BY date ASC;
-    """
-    df = pd.read_sql(query, engine)
+    df = pd.read_sql("SELECT * FROM meter_data ORDER BY date ASC", engine)
+
     if df.empty:
         return df
 
     df["date"] = pd.to_datetime(df["date"]).dt.date
 
-    num_cols = ["wc_mi", "dt", "ci", "mi", "in_house", "supervisory"]
-    for c in num_cols:
+    for c in ["wc_mi", "dt", "ci", "mi", "in_house", "supervisory"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
 
-    df["Total_Manpower"] = df["ci"] + df["mi"] + df["in_house"] + df["supervisory"]
     df["Total_WC_DT"] = df["wc_mi"] + df["dt"]
+    df["Total_Manpower"] = df["ci"] + df["mi"] + df["in_house"] + df["supervisory"]
+
     return df
 
 
@@ -138,343 +124,195 @@ def clear_cache():
 def upsert_row(row):
     engine = get_engine()
     stmt = text("""
-        INSERT INTO meter_data
-            (date, package, wc_mi, dt, ci, mi, in_house, supervisory)
-        VALUES
-            (:date, :package, :wc_mi, :dt, :ci, :mi, :in_house, :supervisory)
-        ON CONFLICT (date, package)
-        DO UPDATE SET
-            wc_mi      = EXCLUDED.wc_mi,
-            dt         = EXCLUDED.dt,
-            ci         = EXCLUDED.ci,
-            mi         = EXCLUDED.mi,
-            in_house   = EXCLUDED.in_house,
-            supervisory= EXCLUDED.supervisory;
+        INSERT INTO meter_data(date, package, wc_mi, dt, ci, mi, in_house, supervisory)
+        VALUES(:date,:package,:wc_mi,:dt,:ci,:mi,:in_house,:supervisory)
+        ON CONFLICT(date,package) DO UPDATE SET
+            wc_mi=EXCLUDED.wc_mi, dt=EXCLUDED.dt,
+            ci=EXCLUDED.ci, mi=EXCLUDED.mi,
+            in_house=EXCLUDED.in_house, supervisory=EXCLUDED.supervisory
     """)
     with engine.begin() as conn:
         conn.execute(stmt, row)
     clear_cache()
 
 
-def kfmt(v: float) -> str:
-    return f"{v/1000:.1f}k" if v >= 1000 else str(int(v))
+def kfmt(v): return f"{v/1000:.1f}k" if v >= 1000 else str(v)
 
 
-# Ensure table exists
+# Ensure DB ready
 init_db()
 
-# ===================== NAVIGATION ===================== #
-mode = st.sidebar.radio("🔀 Navigate", ["Dashboard", "Admin Panel"])
-
 
 # ====================================================== #
-#                       DASHBOARD                        #
+#   📊 DASHBOARD CHART + TABLE                           #
 # ====================================================== #
-def graph_and_table(df_view: pd.DataFrame):
+def graph_and_table(df_view):
     if df_view.empty:
-        st.info("No data available for the selected filters.")
+        st.info("No data found for selected filters.")
         return
 
-    # KPI Calculations
+    # ---------- KPIs ---------- #
     total_meters = int(df_view["Total_WC_DT"].sum())
+    peak_m = df_view.loc[df_view["Total_WC_DT"].idxmax()]
+    peak_mp = df_view.loc[df_view["Total_Manpower"].idxmax()]
 
-    peak_m_idx = df_view["Total_WC_DT"].idxmax()
-    peak_mp_idx = df_view["Total_Manpower"].idxmax()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"<div class='kpi-card'><div class='kpi-label'>📦 Total Meters (WC+DT)</div><div class='kpi-value'>{kfmt(total_meters)}</div></div>", unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"<div class='kpi-card'><div class='kpi-label'>📈 Peak Install</div><div class='kpi-value'>{int(peak_m['Total_WC_DT'])} on {peak_m['date'].strftime('%d-%b')}</div></div>", unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"<div class='kpi-card'><div class='kpi-label'>🧑‍🔧 Peak Manpower</div><div class='kpi-value'>{int(peak_mp['Total_Manpower'])} on {peak_mp['date'].strftime('%d-%b')}</div></div>", unsafe_allow_html=True)
 
-    peak_install_label = (
-        f"{int(df_view.loc[peak_m_idx,'Total_WC_DT'])} on "
-        f"{df_view.loc[peak_m_idx,'date'].strftime('%d-%b')}"
+    # ---------- Chart ---------- #
+    hovertemplate = (
+        "Date: %{x}<br><br>"
+        "Total Manpower: %{customdata[0]}<br>"
+        "CI: %{customdata[1]}<br>"
+        "MI: %{customdata[2]}<br>"
+        "IN-HOUSE: %{customdata[3]}<br>"
+        "Supervisory: %{customdata[4]}<br><br>"
+        "Toolkit: %{customdata[8]}<br>"
+        "Total Meters: %{customdata[5]}<br>"
+        "WC-MI: %{customdata[6]}<br>"
+        "DT: %{customdata[7]}<br>"
+        "<extra></extra>"
     )
 
-    peak_mp_label = (
-        f"{int(df_view.loc[peak_mp_idx,'Total_Manpower'])} on "
-        f"{df_view.loc[peak_mp_idx,'date'].strftime('%d-%b')}"
-    )
-
-    # KPI cards
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(
-            f"<div class='kpi-card'>"
-            f"<div class='kpi-label'>📦 Total Meters (WC+DT)</div>"
-            f"<div class='kpi-value'>{kfmt(total_meters)}</div>"
-            f"</div>", unsafe_allow_html=True)
-
-    with c2:
-        st.markdown(
-            f"<div class='kpi-card'>"
-            f"<div class='kpi-label'>📈 Peak Installation (Meters)</div>"
-            f"<div class='kpi-value'>{peak_install_label}</div>"
-            f"</div>", unsafe_allow_html=True)
-
-    with c3:
-        st.markdown(
-            f"<div class='kpi-card'>"
-            f"<div class='kpi-label'>👥 Peak Manpower</div>"
-            f"<div class='kpi-value'>{peak_mp_label}</div>"
-            f"</div>", unsafe_allow_html=True)
-
-    # Graph rendering
-    full_dates = pd.date_range(df_view["date"].min(), df_view["date"].max()).date
+    df_view["Toolkit"] = df_view["wc_mi"] + df_view["dt"]
 
     fig = go.Figure()
 
-    # WC-MI
     fig.add_trace(go.Bar(
-        x=df_view["date"],
-        y=df_view["wc_mi"],
-        name="WC-MI",
-        marker_color="#FF7B7B",
+        x=df_view["date"], y=df_view["wc_mi"], name="WC-MI", marker_color="#FF7B7B",
+        customdata=df_view[["Total_Manpower","ci","mi","in_house","supervisory",
+                           "Total_WC_DT","wc_mi","dt","Toolkit"]],
+        hovertemplate=hovertemplate
     ))
 
-    # DT
     fig.add_trace(go.Bar(
-        x=df_view["date"],
-        y=df_view["dt"],
-        name="DT",
-        marker_color="#FFD700",
+        x=df_view["date"], y=df_view["dt"], name="DT", marker_color="#FFD700",
+        customdata=df_view[["Total_Manpower","ci","mi","in_house","supervisory",
+                           "Total_WC_DT","wc_mi","dt","Toolkit"]],
+        hovertemplate=hovertemplate
     ))
 
-    # Manpower line
     fig.add_trace(go.Scatter(
-        x=df_view["date"],
-        y=df_view["Total_Manpower"],
-        name="Total Manpower",
-        mode="lines+markers+text",
-        text=[f"<b>{int(v)}</b>" for v in df_view["Total_Manpower"]],
-        textposition="top center",
-        line=dict(color="#003A8C", width=3),
-        marker=dict(size=9, color="#003A8C"),
-        yaxis="y2"
+        x=df_view["date"], y=df_view["Total_Manpower"],
+        name="Total Manpower", mode="lines+markers+text",
+        text=[int(x) for x in df_view["Total_Manpower"]],
+        textposition="top center", marker=dict(size=9, color="#003A8C"),
+        line=dict(color="#003A8C", width=3), yaxis="y2",
+        hoverinfo="skip"
+    ))
+
+    # ===== NEW: K-Value under bars ===== #
+    fig.add_trace(go.Scatter(
+        x=df_view["date"], y=[-50]*len(df_view),
+        mode="text",
+        text=[kfmt(v) for v in df_view["Total_WC_DT"]],
+        textposition="bottom center",
+        textfont=dict(size=11, color="#111827"),
+        hoverinfo="skip", showlegend=False
     ))
 
     fig.update_layout(
         height=580,
         barmode="stack",
-        hovermode="closest",
-        xaxis=dict(
-            tickvals=full_dates,
-            ticktext=[d.strftime("%d-%b") for d in full_dates],
-            tickangle=45
-        ),
-        yaxis=dict(title="Meters", tickformat="~s"),
-        yaxis2=dict(title="Manpower", overlaying="y", side="right"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                    xanchor="center", x=0.5)
+        xaxis=dict(tickangle=45),
+        yaxis=dict(title="Meters"),
+        yaxis2=dict(title="Manpower", side="right", overlaying="y"),
+        margin=dict(b=90),
+        legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center")
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # TABLE
-    table = df_view.set_index("date")[
-        ["Total_WC_DT", "wc_mi", "dt",
-         "Total_Manpower", "ci", "mi", "in_house", "supervisory"]
-    ]
-
-    table.index = pd.to_datetime(table.index)  # FIX applied ✔
+    # ---------- TABLE ---------- #
+    table = df_view.set_index("date")[["Total_WC_DT","wc_mi","dt",
+                                       "Total_Manpower","ci","mi",
+                                       "in_house","supervisory"]]
     table.index = table.index.strftime("%d-%b")
     table = table.T
 
-    table.index = [
-        "🔷 Total Meters (WC+DT)", "WC-MI", "DT",
-        "🟢 Total Manpower", "CI", "MI", "IN-HOUSE", "Supervisory"
-    ]
-
-    table = table.astype(int)
-
-    st.subheader("📋 Date-wise Summary Table")
+    table.index = ["🔷 Total Meters","WC-MI","DT","🟢 Total Manpower",
+                   "CI","MI","IN-HOUSE","Supervisory"]
+    st.subheader("📋 Daily Summary")
     st.dataframe(table, use_container_width=True)
 
 
+# ====================================================== #
+#                      FILTER UI                         #
+# ====================================================== #
 def show_dashboard():
     df = load_data()
     if df.empty:
-        st.info("No data in database yet. Add data from the **Admin Panel**.")
+        st.warning("No Data! Add_meter records in Admin Panel ⬅")
         return
 
-    st.markdown("### 🔍 Filters")
-
-    col1, col2, col3 = st.columns([2, 1, 1])
+    col1, col2, col3 = st.columns([2,1,1])
     with col1:
-        view = st.radio("View Mode", ["Combined View", "Package Wise View"], horizontal=True)
+        view = st.radio("View Mode", ["Combined View","Package Wise"], horizontal=True)
 
-    min_d = df["date"].min()
-    max_d = df["date"].max()
-
+    min_d, max_d = df["date"].min(), df["date"].max()
     with col2:
-        start_date = st.date_input("Start Date", min_d,
-                                   min_value=min_d, max_value=max_d)
+        sd = st.date_input("Start Date", min_d)
     with col3:
-        end_date = st.date_input("End Date", max_d,
-                                 min_value=min_d, max_value=max_d)
+        ed = st.date_input("End Date", max_d)
 
-    if start_date > end_date:
-        st.error("Start Date cannot be after End Date.")
+    if sd > ed:
+        st.error("Invalid date selection")
         return
 
-    mask = (df["date"] >= start_date) & (df["date"] <= end_date)
-    df_range = df[mask]
+    df_range = df[(df["date"]>=sd)&(df["date"]<=ed)]
 
-    if view == "Combined View":
-        grp = df_range.groupby("date")[
-            ["wc_mi", "dt", "ci", "mi", "in_house",
-             "supervisory", "Total_Manpower", "Total_WC_DT"]
-        ].sum().reset_index()
+    if view=="Combined View":
+        grp = df_range.groupby("date").sum().reset_index()
         graph_and_table(grp)
     else:
-        pkg = st.selectbox("Select Package", ALLOWED_PACKAGES)
-        df_pkg = df_range[df_range["package"] == pkg]
-        grp = df_pkg.groupby("date")[
-            ["wc_mi", "dt", "ci", "mi", "in_house",
-             "supervisory", "Total_Manpower", "Total_WC_DT"]
-        ].sum().reset_index()
+        pkg = st.selectbox("Package", ALLOWED_PACKAGES)
+        grp = df_range[df_range["package"]==pkg].groupby("date").sum().reset_index()
         graph_and_table(grp)
 
 
 # ====================================================== #
-#                        ADMIN PANEL                     #
+#                       ADMIN UI                         #
 # ====================================================== #
-def parse_date_col(series: pd.Series) -> pd.Series:
-    parsed = pd.to_datetime(series, errors="coerce", dayfirst=True)
-    mask = parsed.isna()
-    if mask.any():
-        parsed2 = pd.to_datetime(series[mask], errors="coerce", yearfirst=True)
-        parsed.loc[mask] = parsed2
-    return parsed.dt.date
-
-
-def handle_csv_upload(uploaded):
-    try:
-        df_csv = pd.read_csv(uploaded)
-    except Exception as e:
-        st.error(f"Unable to read CSV: {e}")
-        return
-
-    df_csv.columns = [c.strip() for c in df_csv.columns]
-
-    col_map = {
-        "Date": "date",
-        "Package": "package",
-        "WC-MI": "wc_mi",
-        "DT": "dt",
-        "CI": "ci",
-        "MI": "mi",
-        "IN-HOUSE": "in_house",
-        "Supervisory": "supervisory",
-        "sum": "sum_col"
-    }
-    df_csv = df_csv.rename(columns=col_map)
-
-    required = ["date", "package", "wc_mi", "dt", "ci", "mi", "in_house", "supervisory"]
-    missing = [c for c in required if c not in df_csv.columns]
-    if missing:
-        st.error(f"CSV missing required columns: {missing}")
-        return
-
-    df_csv["date"] = parse_date_col(df_csv["date"])
-    df_csv = df_csv.dropna(subset=["date"])
-
-    df_csv["package"] = df_csv["package"].astype(str).str.strip()
-    df_csv = df_csv[df_csv["package"].isin(ALLOWED_PACKAGES)]
-
-    num_cols = ["wc_mi", "dt", "ci", "mi", "in_house", "supervisory"]
-    for c in num_cols:
-        df_csv[c] = pd.to_numeric(df_csv[c], errors="coerce").fillna(0).astype(int)
-
-    count = 0
-    for _, r in df_csv.iterrows():
-        row = dict(
-            date=r["date"],
-            package=r["package"],
-            wc_mi=int(r["wc_mi"]),
-            dt=int(r["dt"]),
-            ci=int(r["ci"]),
-            mi=int(r["mi"]),
-            in_house=int(r["in_house"]),
-            supervisory=int(r["supervisory"])
-        )
-        upsert_row(row)
-        count += 1
-
-    st.success(f"CSV processed successfully. {count} rows inserted/updated.")
-
-
 def show_admin():
-    st.markdown("## 🔐 Admin Panel")
+    st.header("Admin Panel 🔐")
 
-    if "is_admin" not in st.session_state:
-        st.session_state.is_admin = False
+    if "auth" not in st.session_state:
+        st.session_state.auth = False
 
-    if not st.session_state.is_admin:
-        with st.form("login_form"):
-            u = st.text_input("Username")
-            p = st.text_input("Password", type="password")
-            submitted = st.form_submit_button("Login")
-        if submitted:
-            if u == ADMIN_USER and p == ADMIN_PASS:
-                st.session_state.is_admin = True
-                st.success("Logged in ✅")
-            else:
-                st.error("Incorrect username or password.")
+    if not st.session_state.auth:
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.button("Login") and u==ADMIN_USER and p==ADMIN_PASS:
+            st.session_state.auth = True
+            st.success("Welcome Admin! 🔑")
         return
 
-    st.success("Logged In ✅")
+    with st.expander("Add Single Entry"):
+        d = st.date_input("Date", date.today())
+        pkg = st.selectbox("Package", ALLOWED_PACKAGES)
+        wc = st.number_input("WC-MI",0)
+        dt = st.number_input("DT",0)
+        ci = st.number_input("CI",0)
+        mi = st.number_input("MI",0)
+        ih = st.number_input("IN-HOUSE",0)
+        sp = st.number_input("Supervisory",0)
 
-    with st.expander("➕ Insert New Data", expanded=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            d = st.date_input("Date", value=date.today())
-        with c2:
-            pkg = st.selectbox("Package", ALLOWED_PACKAGES)
+        if st.button("Save / Update"):
+            upsert_row(dict(date=d,package=pkg,wc_mi=wc,dt=dt,
+                            ci=ci,mi=mi,in_house=ih,supervisory=sp))
+            st.success("Saved!")
 
-        c3, c4, c5 = st.columns(3)
-        with c3:
-            wc_mi = st.number_input("WC-MI", min_value=0, step=1, value=0)
-        with c4:
-            dt_val = st.number_input("DT", min_value=0, step=1, value=0)
-        with c5:
-            ci = st.number_input("CI", min_value=0, step=1, value=0)
-
-        c6, c7, c8 = st.columns(3)
-        with c6:
-            mi = st.number_input("MI", min_value=0, step=1, value=0)
-        with c7:
-            in_house = st.number_input("IN-HOUSE", min_value=0, step=1, value=0)
-        with c8:
-            sup = st.number_input("Supervisory", min_value=0, step=1, value=0)
-
-        if st.button("Save / Update Row", type="primary"):
-            row = dict(
-                date=d,
-                package=pkg,
-                wc_mi=int(wc_mi),
-                dt=int(dt_val),
-                ci=int(ci),
-                mi=int(mi),
-                in_house=int(in_house),
-                supervisory=int(sup)
-            )
-            upsert_row(row)
-            st.success(f"Saved data for {d.strftime('%d-%b')} — {pkg}")
-
-    with st.expander("📂 Bulk Upload via CSV"):
-        st.write("CSV must have columns:")
-        st.code("Date, Package, WC-MI, DT, CI, MI, IN-HOUSE, Supervisory, sum")
-        uploaded = st.file_uploader("Upload CSV", type=["csv"])
-        if uploaded is not None:
-            handle_csv_upload(uploaded)
-
-    st.subheader("🧾 Latest 20 Rows in Database")
-    df_all = load_data()
-    if df_all.empty:
-        st.info("No data in database yet.")
-    else:
-        df_prev = df_all.sort_values(["date", "package"], ascending=[False, True]).head(20)
-        st.dataframe(df_prev, use_container_width=True)
+    df_preview = load_data().tail(20)
+    st.subheader("Latest Records")
+    st.dataframe(df_preview, use_container_width=True)
 
 
 # ===================== MAIN ===================== #
-if mode == "Dashboard":
-    show_dashboard()
-else:
-    show_admin()
+mode = st.sidebar.radio("Navigate", ["Dashboard","Admin Panel"])
+if mode=="Dashboard": show_dashboard()
+else: show_admin()
