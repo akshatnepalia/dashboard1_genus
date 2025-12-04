@@ -2,189 +2,120 @@ import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
 from sqlalchemy import create_engine, text
-import os
 from datetime import datetime
+import os
 
-# ================= DB CONNECTION ================= #
+# ===================== DB CONNECTION ===================== #
 @st.cache_resource
 def get_engine():
-    db_url = os.getenv("DB_URL")
+    db_user = os.getenv("DB_USER")
+    db_pass = os.getenv("DB_PASS")
+    db_host = os.getenv("DB_HOST")
+    db_name = os.getenv("DB_NAME")
+    
+    db_url = f"postgresql+psycopg2://{db_user}:{db_pass}@{db_host}/{db_name}"
     return create_engine(db_url, pool_pre_ping=True)
 
-# ================= DB TABLE SETUP ================= #
-@st.cache_resource
-def init_db():
-    engine = get_engine()
-    with engine.connect() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS meter_data (
-            id SERIAL PRIMARY KEY,
-            date DATE NOT NULL,
-            package VARCHAR(10) NOT NULL,
-            wc_mi INT DEFAULT 0,
-            dt INT DEFAULT 0,
-            ci INT DEFAULT 0,
-            mi INT DEFAULT 0,
-            in_house INT DEFAULT 0,
-            supervisory INT DEFAULT 0,
-            UNIQUE(date, package)
-        );
-        """))
-    return True
-
-init_db()
-
-# ================= DATA HELPERS ================= #
-@st.cache_data(ttl=10)
+# Load Data
+@st.cache_data(ttl=600)
 def load_data():
     engine = get_engine()
     query = "SELECT * FROM meter_data ORDER BY date ASC"
-    df = pd.read_sql(query, engine)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"])
-        df["total_meters"] = df["wc_mi"] + df["dt"]
-        df["total_manpower"] = df["ci"] + df["mi"] + df["in_house"] + df["supervisory"]
-    return df
+    return pd.read_sql(query, engine)
 
-def insert_data(values):
-    engine = get_engine()
-    with engine.connect() as conn:
-        conn.execute(text("""
-            INSERT INTO meter_data 
-            (date, package, wc_mi, dt, ci, mi, in_house, supervisory)
-            VALUES (:date, :package, :wc_mi, :dt, :ci, :mi, :in_house, :supervisory)
-            ON CONFLICT (date, package)
-            DO UPDATE SET wc_mi = excluded.wc_mi,
-                          dt = excluded.dt,
-                          ci = excluded.ci,
-                          mi = excluded.mi,
-                          in_house = excluded.in_house,
-                          supervisory = excluded.supervisory;
-        """), values)
-    st.success("Data saved successfully!")
-    st.cache_data.clear()
+# ===================== Number Formatting ===================== #
+def format_k(num):
+    return f"{num/1000:.1f}k"
 
-# ================= CUSTOM FORMATTER ================= #
-def fmt_k(v):
-    return f"{v/1000:.1f}k"
-
-# ================= ADMIN PANEL ================= #
-def admin_panel():
-    st.title("🔐 Admin Panel")
-
-    with st.form("login"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        login_btn = st.form_submit_button("Login")
-
-    if login_btn:
-        if username == "admin" and password == "12345":
-            st.session_state.logged = True
-            st.success("Logged In ✓")
-        else:
-            st.error("Invalid credentials")
-
-    if st.session_state.get("logged"):
-        st.subheader("➕ Insert New Data")
-
-        with st.form("insert_form"):
-            date = st.date_input("Date")
-            package = st.selectbox("Package",
-                ["TN-95","TN-96","TN-97","TN-58","TN-59","TN-60","TN-32","TN-33","TN-34"]
-            )
-            wc_mi = st.number_input("WC-MI", 0)
-            dt = st.number_input("DT", 0)
-            ci = st.number_input("CI", 0)
-            mi = st.number_input("MI", 0)
-            in_house = st.number_input("IN-HOUSE", 0)
-            supervisory = st.number_input("Supervisory", 0)
-
-            submitted = st.form_submit_button("Submit")
-            if submitted:
-                insert_data({
-                    "date": date,
-                    "package": package,
-                    "wc_mi": wc_mi,
-                    "dt": dt,
-                    "ci": ci,
-                    "mi": mi,
-                    "in_house": in_house,
-                    "supervisory": supervisory,
-                })
-
-# ================= PLOT + TABLE ================= #
+# ===================== Combined Graph + Table ===================== #
 def graph_and_table(df):
-    df_grouped = df.groupby("date", as_index=False).sum()
 
+    df["Total_Meters"] = df["WC_MI"] + df["DT"]
+    df["Date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("Date")
+
+    dates = df["Date"].dt.strftime("%d-%b")
+
+    # ----- Plot ----- #
     fig = go.Figure()
 
-    # WC-MI Bars with bottom labels in K format
-    fig.add_bar(
-        x=df_grouped["date"],
-        y=df_grouped["wc_mi"],
+    fig.add_trace(go.Bar(
+        x=dates, y=df["WC_MI"],
         name="WC-MI",
-        marker_color="#FF6F6F",
-        text=[fmt_k(x) for x in df_grouped["wc_mi"]],
-        textposition="outside",
-        textfont=dict(size=12, color="black")
-    )
+        marker_color="salmon",
+        hovertemplate="WC-MI: %{y}<extra></extra>"
+    ))
 
-    fig.add_bar(
-        x=df_grouped["date"],
-        y=df_grouped["dt"],
+    fig.add_trace(go.Bar(
+        x=dates, y=df["DT"],
         name="DT",
-        marker_color="#FFD700"
-    )
+        marker_color="#FFD700",
+        hovertemplate="DT: %{y}<extra></extra>"
+    ))
 
     fig.add_trace(go.Scatter(
-        x=df_grouped["date"],
-        y=df_grouped["total_manpower"],
+        x=dates, y=df["Total_Manpower"],
         name="Total Manpower",
         mode="lines+markers+text",
-        marker=dict(color="navy", size=9),
-        text=df_grouped["total_manpower"],
+        marker=dict(color="#003366", size=8),
+        text=df["Total_Manpower"],
         textposition="top center"
     ))
 
+    # Put Total Meter values below bars
+    fig.add_trace(go.Scatter(
+        x=dates,
+        y=[-300] * len(df),  # Slightly below zero baseline
+        mode="text",
+        text=[format_k(x) for x in df["Total_Meters"]],
+        textposition="bottom center",
+        showlegend=False
+    ))
+
     fig.update_layout(
-        barmode="stack",
-        height=600,
-        xaxis_title="Date",
+        barmode='stack',
+        height=480,
+        title="Daily Installed Meters vs Manpower",
         yaxis_title="Meters",
-        legend_title="Legend"
+        xaxis_tickangle=-40,
+        margin=dict(l=20, r=20, t=60, b=120)
     )
 
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("📋 Data Table")
-    st.dataframe(df_grouped.style.format({"total_meters": "{:,}", "total_manpower": "{:,}"}))
+    # ---------- Summary Table ---------- #
+    table_df = df.set_index(dates)[[
+        "Total_Meters", "WC_MI", "DT",
+        "Total_Manpower", "CI", "MI", "IN_HOUSE", "Supervisory"
+    ]]
 
-# ================= DASHBOARD ================= #
-def show_dashboard():
-    st.title("📊 Genus Meter Dashboard — WC/DT + Manpower")
+    # Highlight rows
+    table_df = table_df.style.format("{:,.0f}") \
+        .set_properties(subset=["Total_Meters"], **{"background-color": "#e6f1ff", "font-weight": "bold"}) \
+        .set_properties(subset=["Total_Manpower"], **{"background-color": "#e7f7e7", "font-weight": "bold"}) \
+        .set_table_styles([{
+            "selector": "th",
+            "props": "background-color:#002b4d;color:white;font-weight:bold;"
+        }])
 
-    df = load_data()
-    if df.empty:
-        st.warning("No data available")
-        return
+    st.markdown("### 🧾 Date-wise Summary Table")
+    st.dataframe(table_df, use_container_width=True)
 
-    total_m = df["total_meters"].sum()
-    peak_meters = df.loc[df["total_meters"].idxmax()]
-    peak_mnp = df.loc[df["total_manpower"].idxmax()]
+# ===================== STREAMLIT UI ===================== #
+st.set_page_config(layout="wide")
+st.title("📊 Genus Power — Meter Installation Dashboard")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("📦 Total Meters", f"{total_m:,}")
-    col2.metric("📈 Peak Installation", f"{peak_meters['total_meters']:,}", peak_meters['date'].strftime("%d-%b"))
-    col3.metric("👥 Peak Manpower", f"{peak_mnp['total_manpower']:,}", peak_mnp['date'].strftime("%d-%b"))
+df = load_data()
 
-    graph_and_table(df)
+col1, col2 = st.columns(2)
+start = col1.date_input("Start Date", df["date"].min())
+end = col2.date_input("End Date", df["date"].max())
 
-# ================= MAIN PAGE ================= #
-st.sidebar.title("Navigation")
-choice = st.sidebar.radio("Go to:",
-                         ["Admin Panel", "Dashboard"])
+mask = (pd.to_datetime(df["date"]) >= pd.to_datetime(start)) & \
+       (pd.to_datetime(df["date"]) <= pd.to_datetime(end))
+filtered = df[mask]
 
-if choice == "Admin Panel":
-    admin_panel()
+if filtered.empty:
+    st.warning("No data available for the selected date range.")
 else:
-    show_dashboard()
+    graph_and_table(filtered)
