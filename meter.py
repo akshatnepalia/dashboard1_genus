@@ -40,7 +40,7 @@ st.markdown("""
 # ===================== HEADER ===================== #
 st.markdown("""
 <div style='text-align:center;margin-bottom:0.5rem;'>
-    <span style='font-size:42px;font-weight:800;color:#003A8C;'>
+    <span style='font-size:52px;font-weight:800;color:#003A8C;'>
         Genus Power Infrastructures Ltd.
     </span>
     <div style='width:260px;height:4px;margin:6px auto;
@@ -554,3 +554,4 @@ if mode == "Dashboard":
     show_dashboard()
 else:
     show_admin()
+
